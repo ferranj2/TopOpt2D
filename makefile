@@ -12,3 +12,9 @@ TopOpt2: TopOpt2.o
 TopOpt2filter: TopOpt2filter.o
 	-${CLINKER} -o TopOpt2filter TopOpt2filter.o ${PETSC_LIB}
 	${RM} TopOpt2filter.o
+TestMatGenAndPlot: TestMatGenAndPlot.o  chkopts
+        -${CLINKER} -o TestMatGenAndPlot TestMatGenAndPlot.o  ${PETSC_SYS_LIB}
+        ${RM} TestMatGenAndPlot.o
+CleanImage:
+	rm -f tmpDat/*.dat rm -f tmpAni/*.jpg
+
