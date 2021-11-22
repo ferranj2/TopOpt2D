@@ -96,8 +96,8 @@ ierr = MatCreate(PETSC_COMM_WORLD,&x); CHKERRQ(ierr);
 ierr = MatSetSizes(x,PETSC_DECIDE,PETSC_DECIDE,nelx,nely); CHKERRQ(ierr);
 ierr = MatSetType(x,MATDENSE); CHKERRQ(ierr);
 ierr = MatSetUp(x); CHKERRQ(ierr);
-for(i=0;j<nelx;i++){
-  for(j=0;i<nely;j++){
+for(i=0;i<nelx;i++){
+  for(j=0;j<nely;j++){
     ierr = MatSetValue(x,i,j,volfrac,INSERT_VALUES); CHKERRQ(ierr);
   }//end "j" loop
 }//end "i" loop
