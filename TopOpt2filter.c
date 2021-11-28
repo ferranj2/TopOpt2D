@@ -19,6 +19,7 @@ int main(int argc, char **args){
       KE,//Local stiffness matrix. (KE) [Common to ALL elements]
       KEc,//Local stiffness matrix of element_ij. (KEc)
       x,//Elemental density matrix. (x)
+      xnew,//Updated elemental density matrix (xnew).
       dc,//Elemental sensitivity matrix (dx)
       dcn;//Filtered dc.
   KSP ksp;//Linear solver object.
@@ -39,7 +40,7 @@ int main(int argc, char **args){
             P = 3, //Penalization coefficient.
             volfrac = 0.5,//Volume fraction.
             *coeffKEc;
-  PetscScalar change = 0,
+  PetscReal change = 1,
               x_ij,//Variable to reference element_ij's density.
               c = 0,//Compliance of element_ij.
               C = 0;//Compliance of the whole structure.
@@ -123,6 +124,12 @@ for(i=0;i<nely;i++){
 ierr = MatAssemblyBegin(x,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
 ierr = MatAssemblyEnd(x,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
 
+//Updated elemental density matrix (xnew).
+ierr = MatCreate(PETSC_COMM_WORLD,&xnew); CHKERRQ(ierr);
+ierr = MatSetSizes(xnew,PETSC_DECIDE,PETSC_DECIDE,nelx,nely); CHKERRQ(ierr);
+ierr = MatSetType(xnew,MATDENSE); CHKERRQ(ierr);
+ierr = MatSetUp(xnew); CHKERRQ(ierr);
+
 //Force vector (RHS in the FEA subroutine).
 ierr = VecCreate(PETSC_COMM_WORLD,&F); CHKERRQ(ierr);
 ierr = VecSetSizes(F,PETSC_DECIDE,size); CHKERRQ(ierr);
@@ -155,7 +162,7 @@ ierr = KSPCreate(PETSC_COMM_WORLD,&ksp); CHKERRQ(ierr);//Create the solver.
 //*****************END  (OBJECT SETUP)*************************
 
 
-
+while(change > 0.01){
 loop++;//Update loop iteration.
 //FINITE ELEMENT ANALYSIS
 //*****************BEGIN(FEA)*************************
@@ -200,10 +207,11 @@ loop++;//Update loop iteration.
   ierr = KSPSolve(ksp,F,U); CHKERRQ(ierr);//Solve K*U = F.
   //*****************END  (FEA)*************************
 
-
+  //================BEGIN (COMPLIANCE & SENSITIVITIES)==========================
   PetscInt index[8] ={0,1,2,3,4,5,6,7};//indices for "select" below.
   PetscScalar select[8],//Store subset values here.
               dx_ij;//Stores sensitivity of x_ij of element_ij.
+              C = 0; //Reset compliance counter.
 
   //Elementwise measurement of the compliance.
   for(i=0;i<nely;i++){//Scan elements row-wise
@@ -235,10 +243,10 @@ loop++;//Update loop iteration.
 
   ierr = MatAssemblyBegin(dc,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
   ierr = MatAssemblyEnd(dc,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
-  ierr = MatView(dc,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr);
-  ierr = VecView(U,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr);
-  PetscPrintf(PETSC_COMM_WORLD,"Compliance C = %.6e\n",C);
-  C = 0; //Reset compliance counter.
+  //ierr = MatView(dc,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr);
+  //ierr = VecView(U,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr);
+  //PetscPrintf(PETSC_COMM_WORLD,"Compliance C = %.6e\n",C);
+  //================END (COMPLIANCE & SENSITIVITIES)==========================
 
   //==========================BEGIN  (FILTERING)===============================
   PetscScalar sum,fac,rad_kl,dcn_ji,x_lk,dc_lk,x_ji;
@@ -281,24 +289,64 @@ loop++;//Update loop iteration.
   }//end "i" loop.
   ierr = MatAssemblyBegin(dcn,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
   ierr = MatAssemblyEnd(dcn,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
-  ierr = MatView(dcn,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr);
+  //ierr = MatView(dcn,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr); //(DEBUG)
   //============================END  (FILTERING)=========================
 
 
   //*****************BEGIN  (OPTIMALITY CRITERIA)*************************
-/*
-  PetscReal lambda1=0,lambda2 =100000,lmid, m=0.2;
+  PetscReal lambda1=0,lambda2 =100000,lmid, m=0.2,sumx,xnew_ij;
   while((lambda2-lambda1)>0.0001){
     lmid = (lambda2+lambda1)/2;
-  }//end while
-*/
-  //*****************END  (OPTIMALITY CRITERIA)*************************
+    sumx = 0;
+    for(i=0;i<nely;i++){
+      for(j=0;j<nelx;j++){
+        ierr = MatGetValue(x,i,j,&x_ij); CHKERRQ(ierr);
+        ierr = MatGetValue(dcn,i,j,&dx_ij); CHKERRQ(ierr);
+        xnew_ij = x_ij*PetscPowScalar(-dx_ij/lmid,0.5);
+        if(xnew_ij>(x_ij+m)){
+          xnew_ij = x_ij+m;
+        }//end if
+        if(xnew_ij>1){
+          xnew_ij = 1;
+        }//end if.
+        if(xnew_ij<(x_ij-m)){
+          xnew_ij = x_ij-m;
+        }//end if.
+        if(xnew_ij<0.001){
+          xnew_ij = 0.001;
+        }//end if.
+        sumx += xnew_ij;
+        ierr = MatSetValue(xnew,i,j,xnew_ij,INSERT_VALUES); CHKERRQ(ierr);
+      }//end "j" loop.
+    }//end "i" loop.
 
+    if(sumx > (volfrac*nelx*nely)){
+      lambda1 = lmid;
+    }//end if.
+    else{
+      lambda2 = lmid;
+    }//end else.
+  }//end while
+  ierr = MatAssemblyBegin(xnew,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
+  ierr = MatAssemblyEnd(xnew,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
+  //ierr = MatView(xnew,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr); //(DEBUG)
+  //*****************END  (OPTIMALITY CRITERIA)*************************
+  //Compute change.
+  ierr = MatAXPY(x,-1,xnew,SAME_NONZERO_PATTERN);CHKERRQ(ierr);
+  ierr = MatNorm(x,NORM_INFINITY,&change);CHKERRQ(ierr);
+
+  PetscPrintf(PETSC_COMM_WORLD,"Iter: %3d\tC = %10.5f\tVol = %10.5f\t change = %10.5f \n",loop,C,sumx/(nelx*nely),change);
+
+  //Update values for next iteration.
+  ierr = MatDuplicate(dcn,MAT_COPY_VALUES,&dc); CHKERRQ(ierr);
+  ierr = MatDuplicate(xnew,MAT_COPY_VALUES,&x); CHKERRQ(ierr);
+}//end while.
 
 
   //Cleanup (free-up memory)
   KSPDestroy(&ksp);
-  MatDestroy(&K); MatDestroy(&KE); MatDestroy(&KEc); MatDestroy(&dc); MatDestroy(&x);
+  MatDestroy(&K); MatDestroy(&KE); MatDestroy(&KEc); MatDestroy(&dc);
+  MatDestroy(&xnew); MatDestroy(&x); MatDestroy(&dcn);
   VecDestroy(&F); VecDestroy(&U); VecDestroy(&Ue); VecDestroy(&Uc);
 
   return PetscFinalize();
