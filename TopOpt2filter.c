@@ -119,19 +119,19 @@ ierr = MatSetType(KEc,MATDENSE); CHKERRQ(ierr);
 //*****************BEGIN(OBJECT SETUP)*************************
 //Elemental sensitivity matrix (dc)
 ierr = MatCreate(PETSC_COMM_WORLD,&dc); CHKERRQ(ierr);
-ierr = MatSetSizes(dc,PETSC_DECIDE,PETSC_DECIDE,nelx,nely); CHKERRQ(ierr);
+ierr = MatSetSizes(dc,PETSC_DECIDE,PETSC_DECIDE,nely,nelx); CHKERRQ(ierr);
 ierr = MatSetType(dc,MATDENSE); CHKERRQ(ierr);
 ierr = MatSetUp(dc); CHKERRQ(ierr);
 
 //Filtered dc matrix (dcn)
 ierr = MatCreate(PETSC_COMM_WORLD,&dcn); CHKERRQ(ierr);
-ierr = MatSetSizes(dcn,PETSC_DECIDE,PETSC_DECIDE,nelx,nely); CHKERRQ(ierr);
+ierr = MatSetSizes(dcn,PETSC_DECIDE,PETSC_DECIDE,nely,nelx); CHKERRQ(ierr);
 ierr = MatSetType(dcn,MATDENSE); CHKERRQ(ierr);
 ierr = MatSetUp(dcn); CHKERRQ(ierr);
 
 //Elemental density matrix (x) [Initialize all with the input volfrac]
 ierr = MatCreate(PETSC_COMM_WORLD,&x); CHKERRQ(ierr);
-ierr = MatSetSizes(x,PETSC_DECIDE,PETSC_DECIDE,nelx,nely); CHKERRQ(ierr);
+ierr = MatSetSizes(x,PETSC_DECIDE,PETSC_DECIDE,nely,nelx); CHKERRQ(ierr);
 ierr = MatSetType(x,MATDENSE); CHKERRQ(ierr);
 ierr = MatSetUp(x); CHKERRQ(ierr);
 
@@ -146,7 +146,7 @@ ierr = MatAssemblyEnd(x,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
 
 //Updated elemental density matrix (xnew).
 ierr = MatCreate(PETSC_COMM_WORLD,&xnew); CHKERRQ(ierr);
-ierr = MatSetSizes(xnew,PETSC_DECIDE,PETSC_DECIDE,nelx,nely); CHKERRQ(ierr);
+ierr = MatSetSizes(xnew,PETSC_DECIDE,PETSC_DECIDE,nely,nelx); CHKERRQ(ierr);
 ierr = MatSetType(xnew,MATDENSE); CHKERRQ(ierr);
 ierr = MatSetUp(xnew); CHKERRQ(ierr);
 
@@ -191,16 +191,17 @@ while(loop<=1){
   for(i=0;i<nely;i++){//scan rows of elements.
     for(j=0;j<nelx;j++){//scan columns of elements.
       //LI of nodes in the mesh (dof's are Ux,Uy vertical pairs in column-major order)
-      n1 = j + i*ny;//LI of TL corner of element_ij in stencil.
-      n2 = n1 + ny;//LI of TR corner of element_ij in stencil.
+      n1 = j + i*nx;//LI of TL corner of element_ij in stencil.
+      n2 = n1 + 1;//LI of TR corner of element_ij in stencil.
       edof[0] = 2*n1;//LI of X-displacement of TL corner in U.
       edof[1] = edof[0]+1;//LI of Y-displacement of TL corner in U.
       edof[2] = 2*n2;//LI X-displacement of TR corner in U.
       edof[3] = edof[2]+1;//LI Y-displacement of TR corner in U.
-      edof[4] = edof[3]+1;//LI X-displacement of BL corner in U.
-      edof[5] = edof[4]+1;//LI Y-displacement of BL corner in U.
-      edof[6] = edof[1]+1;//LI X-displacement of BR corner in U.
-      edof[7] = edof[6]+1;//LI Y-displacement of BR corner in U.
+      edof[4] = 2*(n2+nx);//LI X-displacement of BR corner in U.
+      edof[5] = edof[4]+1;//LI Y-displacement of BR corner in U.
+      edof[6] = 2*(n1+nx);//LI X-displacement of BL corner in U.
+      edof[7] = edof[6]+1;//LI Y-displacement of BL corner in U.
+
       ierr = MatGetValue(x,i,j,&x_ij); CHKERRQ(ierr);
       ierr = MatDuplicate(KE,MAT_COPY_VALUES,&KEc); CHKERRQ(ierr);
       ierr = MatScale(KEc,PetscPowScalar(x_ij,P)); CHKERRQ(ierr);
@@ -214,7 +215,7 @@ while(loop<=1){
 
   //Dirichlet BC: X-displacements clamped on left edge.
   for(i=0;i<ny;i++){//Scan along the y-nodes
-    n1 = i*2;//"n1" now stores the row index of the clamped X-nodes.
+    n1 = i*2*nx;//"n1" now stores the row index of the clamped X-nodes.
     ierr = MatZeroRows(K,1,&n1,1,NULL,NULL); CHKERRQ(ierr);
   }//end "w" loop
 
@@ -225,6 +226,7 @@ while(loop<=1){
   ierr = KSPSetOperators(ksp,K,K); CHKERRQ(ierr);//Set "A" matrix and preconditioner.
   ierr = KSPSetFromOptions(ksp); CHKERRQ(ierr);//Allow for optional user settings.
   ierr = KSPSolve(ksp,F,U); CHKERRQ(ierr);//Solve K*U = F.
+  ierr = VecView(U,PETSC_VIEWER_STDOUT_WORLD);
   //*****************END  (FEA)*************************
 
   //================BEGIN (COMPLIANCE & SENSITIVITIES)==========================
@@ -232,16 +234,16 @@ while(loop<=1){
   //Elementwise measurement of the compliance.
   for(i=0;i<nely;i++){//Scan elements row-wise
     for(j=0;j<nelx;j++){//At current row scan elements column-wise.
-      n1 = j + i*ny;//LI of TL corner of element_ij in stencil.
-      n2 = n1 + ny;//LI of TR corner of element_ij in stencil.
+      n1 = j + i*nx;//LI of TL corner of element_ij in stencil.
+      n2 = n1 + 1;//LI of TR corner of element_ij in stencil.
       edof[0] = 2*n1;//LI of X-displacement of TL corner in U.
       edof[1] = edof[0]+1;//LI of Y-displacement of TL corner in U.
       edof[2] = 2*n2;//LI X-displacement of TR corner in U.
       edof[3] = edof[2]+1;//LI Y-displacement of TR corner in U.
-      edof[4] = edof[3]+1;//LI X-displacement of BL corner in U.
-      edof[5] = edof[4]+1;//LI Y-displacement of BL corner in U.
-      edof[6] = edof[1]+1;//LI X-displacement of BR corner in U.
-      edof[7] = edof[6]+1;//LI Y-displacement of BR corner in U.
+      edof[4] = 2*(n2+nx);//LI X-displacement of BR corner in U.
+      edof[5] = edof[4]+1;//LI Y-displacement of BR corner in U.
+      edof[6] = 2*(n1+nx);//LI X-displacement of BL corner in U.
+      edof[7] = edof[6]+1;//LI Y-displacement of BL corner in U.
 
       ierr = VecGetValues(U,8,edof,select); CHKERRQ(ierr);//Extract values from the global displacement vector.
       ierr = VecSetValues(Ue,8,index,select,INSERT_VALUES); CHKERRQ(ierr);//Build the displacement vector Ue of element_ij.
@@ -251,7 +253,7 @@ while(loop<=1){
       ierr = MatGetValue(x,i,j,&x_ij); CHKERRQ(ierr);//Get the density of element_ij.
       C += c*PetscPowScalar(x_ij,P);//Add the compliance of element_ij to the running total.
       dx_ij = -P*PetscPowScalar(x_ij,P-1)*c;//Compute the "natural" sensitivity of element_ij.
-      ierr = MatSetValue(dc,j,i,dx_ij,INSERT_VALUES); CHKERRQ(ierr); //FOR WHATEVER REASON IT TRANSPOSES THE MATRIX IF I DO i,j instead of j,i
+      ierr = MatSetValue(dc,i,j,dx_ij,INSERT_VALUES); CHKERRQ(ierr);
     }//end "j" loop.
   }//end "i" loop.
 
