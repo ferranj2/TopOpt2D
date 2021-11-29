@@ -13,8 +13,8 @@ int main(int argc, char **args){
   //PetscViewer viewer;
   Vec F, //Force vector (F)
       U, //Gloval displacement vector (U)
-      Ue, //Displacement vector of element_ij #1.
-      Uc; //Displacement vector of element_ij #2.
+      Ue, //Displacement vector of element_ij #1. Used to compute elementwise compliance.
+      Uc; //Displacement vector of element_ij #2. Used to compute elementwise compliance.
   Mat K,//Global stiffness matrix. (K)
       KE,//Local stiffness matrix. (KE) [Common to ALL elements]
       KEc,//Local stiffness matrix of element_ij. (KEc)
@@ -30,20 +30,43 @@ int main(int argc, char **args){
            ny, //Number of nodes distributed along y-direction.
            size,//Size of global stiffness matrix K (K = size by size)
            sizeKE = 8,//Size of local stiffness matrix KE (KE = sizeKE by sizeKE)
-           loop = 0;// TopOpt iteration counter.
-  PetscInt i, j, w;//Looping variables
-  PetscInt n1,n2,last,edof[8];//Dedicated variables for array indexing.
-  PetscInt LIFy[1] = {1};//LI of the dof where Fy is to act.
+           loop = 0,// TopOpt iteration counter.
+           kk,l, //FILTER Looping variables.
+           k1,//FILTER: Lower x-limit of filtering zone (in integer units.).
+           k2,//FILTER: Upper x-limit of filtering zone.
+           l1,//FILTER: Lower y-limit of filtering zone.
+           l2,//FILTER: Upper y-limit of filtering zone.
+           i, j,//Looping variables for elements.
+           index[8] ={0,1,2,3,4,5,6,7},//Variable used to index the element stiffness matrix.
+           n1,//FEA: Linear index of top-left corner of element_ij in "stencil".
+           n2,//FEA: Linear index of top-right corner of element_ij in "stencil".
+           last,//FEA: Linear index of last degree of freedom in Mat K.
+           edof[8],//Dedicated variables for indexing of mat K.
+           LIFy[1] = {1};//LI of the dof where Fy is to act.
   PetscReal E = 1, //Young's Modulus
             nu = 0.3, //Poisson's ratio.
             Fy = -1, //Force applied (nondimendional)
             P = 3, //Penalization coefficient.
             volfrac = 0.5,//Volume fraction.
-            *coeffKEc;
-  PetscReal change = 1,
-              x_ij,//Variable to reference element_ij's density.
-              c = 0,//Compliance of element_ij.
-              C = 0;//Compliance of the whole structure.
+            *coeffKEc,//Pointer to scaled element stiffness matrix.
+            change = 1,//Convergence measure for main while loop.
+            x_ij,//Variable to reference element_ij's density.
+            c = 0,//Compliance of element_ij.
+            C = 0,//Compliance of the whole structure.
+            dx_ij,//Stores sensitivity of x_ij of element_ij.
+            select[8],//Variable used to subset element stiffness matrix.
+            lambda1,//OC: Lower limit on Lagrange multiplier.
+            lmid,//OC: middle Lagrange multiplier for bisection search.
+            lambda2,//OC: Upper limit on Lagrange multiplier.
+            m=0.2,//OC: "moving" limit.
+            sumx,//OC: Measures the "volume" of the design.
+            xnew_ij,//OC: Variable used to reference elements of xnew Mat.
+            sum,//FILTER.
+            fac,//FILTER.
+            dcn_ji,//FILTER.
+            x_lk,//FILTER.
+            dc_lk,//FILTER.
+            x_ji;//FILTER
 
   ierr = PetscInitialize(&argc,&args,NULL,help); if(ierr) return ierr;
   ierr = PetscOptionsBegin(PETSC_COMM_WORLD,"opt_","options for mesh","");CHKERRQ(ierr);
@@ -54,7 +77,7 @@ int main(int argc, char **args){
   ierr = PetscOptionsReal("-Fy","Force applied.","TopOpt.c",Fy,&Fy,NULL); CHKERRQ(ierr);
   ierr = PetscOptionsEnd(); CHKERRQ(ierr);
 
-  //Grid setup variables.40
+  //Grid setup variables.
   nx = nelx + 1;//Number of X-nodes.
   ny = nely + 1;//Number of Y-nodes.
   size = 2*nx*ny; //Size of the global stiffness matrix.
@@ -91,12 +114,7 @@ ierr = MatAssemblyEnd(KE,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
 ierr = MatCreate(PETSC_COMM_WORLD,&KEc); CHKERRQ(ierr);
 ierr = MatSetSizes(KEc,PETSC_DECIDE,PETSC_DECIDE,8,8); CHKERRQ(ierr);
 ierr = MatSetType(KEc,MATDENSE); CHKERRQ(ierr);
-
-
-
 //*****************END ELEMENT STIFFNESS MATRIX (KE)*************************
-
-
 
 //*****************BEGIN(OBJECT SETUP)*************************
 //Elemental sensitivity matrix (dc)
@@ -116,6 +134,8 @@ ierr = MatCreate(PETSC_COMM_WORLD,&x); CHKERRQ(ierr);
 ierr = MatSetSizes(x,PETSC_DECIDE,PETSC_DECIDE,nelx,nely); CHKERRQ(ierr);
 ierr = MatSetType(x,MATDENSE); CHKERRQ(ierr);
 ierr = MatSetUp(x); CHKERRQ(ierr);
+
+//FIGURE OUT HOW NOT TO NEED THESE FOR LOOPS!!!! ANNOYING EYESORE!!!
 for(i=0;i<nely;i++){
   for(j=0;j<nelx;j++){
     ierr = MatSetValue(x,i,j,volfrac,INSERT_VALUES); CHKERRQ(ierr);
@@ -159,13 +179,14 @@ ierr = MatSetUp(K); CHKERRQ(ierr);
 
 //Linear solver setup.
 ierr = KSPCreate(PETSC_COMM_WORLD,&ksp); CHKERRQ(ierr);//Create the solver.
+//ierr = KSPSetType(ksp,)
 //*****************END  (OBJECT SETUP)*************************
 
 
-while(change > 0.01){
-loop++;//Update loop iteration.
-//FINITE ELEMENT ANALYSIS
-//*****************BEGIN(FEA)*************************
+//while(change > 0.01){
+while(loop<=1){
+  loop++;//Update loop iteration.
+  //*****************BEGIN(FEA)*************************
   //Global stiffness matrix (A matrix in the FEA subroutine)
   for(i=0;i<nely;i++){//scan rows of elements.
     for(j=0;j<nelx;j++){//scan columns of elements.
@@ -182,19 +203,18 @@ loop++;//Update loop iteration.
       edof[7] = edof[6]+1;//LI Y-displacement of BR corner in U.
       ierr = MatGetValue(x,i,j,&x_ij); CHKERRQ(ierr);
       ierr = MatDuplicate(KE,MAT_COPY_VALUES,&KEc); CHKERRQ(ierr);
-      PetscReal scale =  PetscPowScalar(x_ij,P);
-      ierr = MatScale(KEc,scale); CHKERRQ(ierr);
+      ierr = MatScale(KEc,PetscPowScalar(x_ij,P)); CHKERRQ(ierr);
       ierr = MatDenseGetArray(KEc,&coeffKEc);CHKERRQ(ierr);
       ierr = MatSetValues(K,8,edof,8,edof,coeffKEc,ADD_VALUES); CHKERRQ(ierr);
-
+      ierr = MatDenseRestoreArray(KEc,&coeffKEc); CHKERRQ(ierr);
     }//end "j" loop
   }//end "i" loop
   ierr = MatAssemblyBegin(K,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
   ierr = MatAssemblyEnd(K,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
 
   //Dirichlet BC: X-displacements clamped on left edge.
-  for(w=0;w<ny;w++){//Scan along the y-nodes
-    n1 = w*2;//"n1" now stores the row index of the clamped X-nodes.
+  for(i=0;i<ny;i++){//Scan along the y-nodes
+    n1 = i*2;//"n1" now stores the row index of the clamped X-nodes.
     ierr = MatZeroRows(K,1,&n1,1,NULL,NULL); CHKERRQ(ierr);
   }//end "w" loop
 
@@ -208,11 +228,7 @@ loop++;//Update loop iteration.
   //*****************END  (FEA)*************************
 
   //================BEGIN (COMPLIANCE & SENSITIVITIES)==========================
-  PetscInt index[8] ={0,1,2,3,4,5,6,7};//indices for "select" below.
-  PetscScalar select[8],//Store subset values here.
-              dx_ij;//Stores sensitivity of x_ij of element_ij.
-              C = 0; //Reset compliance counter.
-
+  C = 0; //Reset compliance counter.
   //Elementwise measurement of the compliance.
   for(i=0;i<nely;i++){//Scan elements row-wise
     for(j=0;j<nelx;j++){//At current row scan elements column-wise.
@@ -229,8 +245,6 @@ loop++;//Update loop iteration.
 
       ierr = VecGetValues(U,8,edof,select); CHKERRQ(ierr);//Extract values from the global displacement vector.
       ierr = VecSetValues(Ue,8,index,select,INSERT_VALUES); CHKERRQ(ierr);//Build the displacement vector Ue of element_ij.
-      ierr = VecAssemblyBegin(Ue); CHKERRQ(ierr);
-      ierr = VecAssemblyEnd(Ue); CHKERRQ(ierr);
       ierr = MatMult(KE,Ue,Uc); CHKERRQ(ierr);
       ierr = VecDot(Ue,Uc,&c); CHKERRQ(ierr);
 
@@ -243,21 +257,14 @@ loop++;//Update loop iteration.
 
   ierr = MatAssemblyBegin(dc,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
   ierr = MatAssemblyEnd(dc,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
-  //ierr = MatView(dc,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr);
+  ierr = MatView(dc,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr);
   //ierr = VecView(U,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr);
-  //PetscPrintf(PETSC_COMM_WORLD,"Compliance C = %.6e\n",C);
   //================END (COMPLIANCE & SENSITIVITIES)==========================
 
   //==========================BEGIN  (FILTERING)===============================
-  PetscScalar sum,fac,rad_kl,dcn_ji,x_lk,dc_lk,x_ji;
-  PetscInt kk,l, //Looping variables.
-           k1,
-           k2,
-           l1,
-           l2;
   for(i=0;i<nelx;i++){
     for(j=0;j<nely;j++){
-      sum = 0.0;
+      sum = 0.0;//Reset sum.
       dcn_ji = 0;//Reset dcn_ji.
 
       //NO handy max()/min() functions in PETSc.
@@ -272,32 +279,33 @@ loop++;//Update loop iteration.
 
       for(kk=k1;kk<=k2;kk++){
         for(l=l1;l<=l2;l++){
-          rad_kl = PetscPowScalar((i-kk),2) + PetscPowScalar((j-l),2);
-          fac = rmin - PetscPowScalar(rad_kl,0.5);
+          fac = rmin - PetscPowScalar(PetscPowScalar((i-kk),2) + PetscPowScalar((j-l),2),0.5);
           if(fac>0){
-            ierr = MatGetValues(x,1,&l,1,&kk,&x_lk); CHKERRQ(ierr);
-            ierr = MatGetValues(dc,1,&l,1,&kk,&dc_lk); CHKERRQ(ierr);
+            ierr = MatGetValue(x,l,kk,&x_lk); CHKERRQ(ierr);
+            ierr = MatGetValue(dc,l,kk,&dc_lk); CHKERRQ(ierr);
             sum += fac;
             dcn_ji += x_lk*dc_lk*fac;
           }//end if
         }//end "l" loop.
       }//end "k" loop.
-      ierr = MatGetValues(x,1,&j,1,&i,&x_ji); CHKERRQ(ierr);
+      ierr = MatGetValue(x,j,i,&x_ji); CHKERRQ(ierr);
       dcn_ji /= (sum*x_ji);
       ierr = MatSetValue(dcn,j,i,dcn_ji,INSERT_VALUES); CHKERRQ(ierr);
     }//end "j" loop.
   }//end "i" loop.
   ierr = MatAssemblyBegin(dcn,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
   ierr = MatAssemblyEnd(dcn,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
-  //ierr = MatView(dcn,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr); //(DEBUG)
+  ierr = MatView(dcn,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr); //(DEBUG)
   //============================END  (FILTERING)=========================
 
 
-  //*****************BEGIN  (OPTIMALITY CRITERIA)*************************
-  PetscReal lambda1=0,lambda2 =100000,lmid, m=0.2,sumx,xnew_ij;
+  //=================BEGIN  (OPTIMALITY CRITERIA)========================
+  //ierr = MatView(x,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr);
+  lambda1 = 0;
+  lambda2 = 100000;
   while((lambda2-lambda1)>0.0001){
     lmid = (lambda2+lambda1)/2;
-    sumx = 0;
+    sumx = 0;//Reset volume measure.
     for(i=0;i<nely;i++){
       for(j=0;j<nelx;j++){
         ierr = MatGetValue(x,i,j,&x_ij); CHKERRQ(ierr);
@@ -330,16 +338,16 @@ loop++;//Update loop iteration.
   ierr = MatAssemblyBegin(xnew,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
   ierr = MatAssemblyEnd(xnew,MAT_FINAL_ASSEMBLY); CHKERRQ(ierr);
   //ierr = MatView(xnew,PETSC_VIEWER_STDOUT_WORLD); CHKERRQ(ierr); //(DEBUG)
-  //*****************END  (OPTIMALITY CRITERIA)*************************
-  //Compute change.
-  ierr = MatAXPY(x,-1,xnew,SAME_NONZERO_PATTERN);CHKERRQ(ierr);
-  ierr = MatNorm(x,NORM_INFINITY,&change);CHKERRQ(ierr);
+  //===================END  (OPTIMALITY CRITERIA)=========================
 
+  //Compute change and report iteration statistics.
+  ierr = MatAXPY(x,-1,xnew,SAME_NONZERO_PATTERN);CHKERRQ(ierr);//Use storage of x Mat to compute x- xnew.
+  ierr = MatNorm(x,NORM_INFINITY,&change);CHKERRQ(ierr);//This finds the maximum abs(x-xnew).
   PetscPrintf(PETSC_COMM_WORLD,"Iter: %3d\tC = %10.5f\tVol = %10.5f\t change = %10.5f \n",loop,C,sumx/(nelx*nely),change);
-
   //Update values for next iteration.
-  ierr = MatDuplicate(dcn,MAT_COPY_VALUES,&dc); CHKERRQ(ierr);
-  ierr = MatDuplicate(xnew,MAT_COPY_VALUES,&x); CHKERRQ(ierr);
+  ierr = MatScale(K,0);CHKERRQ(ierr); //zero the global stiffness matrix.
+  //ierr = MatDuplicate(xnew,MAT_COPY_VALUES,&x); CHKERRQ(ierr);//x = x_new
+  ierr = MatCopy(xnew,x,SAME_NONZERO_PATTERN); CHKERRQ(ierr);
 }//end while.
 
 
@@ -348,6 +356,5 @@ loop++;//Update loop iteration.
   MatDestroy(&K); MatDestroy(&KE); MatDestroy(&KEc); MatDestroy(&dc);
   MatDestroy(&xnew); MatDestroy(&x); MatDestroy(&dcn);
   VecDestroy(&F); VecDestroy(&U); VecDestroy(&Ue); VecDestroy(&Uc);
-
   return PetscFinalize();
 }//end main function
